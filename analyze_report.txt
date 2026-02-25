@@ -1,0 +1,11 @@
+Analyzing clear_ui...                                           
+
+warning - Unused import: 'video_analysis_screen.dart' - lib\screens\alerts_screen.dart:3:8 - unused_import
+  error - The getter 'review_outlined' isn't defined for the type 'Icons' - lib\screens\alerts_screen.dart:153:22 - undefined_getter
+warning - The value of the field '_kOverview' isn't used - lib\screens\dashboard_screen.dart:24:20 - unused_field
+warning - The value of the field '_kAlerts' isn't used - lib\screens\dashboard_screen.dart:26:20 - unused_field
+warning - The value of the field '_kHistory' isn't used - lib\screens\dashboard_screen.dart:27:20 - unused_field
+warning - The value of the field '_paymentMethod' isn't used - lib\screens\offender_portal_screen.dart:16:10 - unused_field
+warning - Unused import: '../widgets/detection_card.dart' - lib\screens\video_analysis_screen.dart:3:8 - unused_import
+
+7 issues found. (ran in 5.4s)
