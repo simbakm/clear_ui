@@ -1,10 +1,18 @@
 import 'package:flutter/material.dart';
+import 'package:video_player/video_player.dart';
 import '../theme/app_theme.dart';
+import '../models/camera.dart' as model;
+import '../models/incident.dart' as model;
+import '../services/api_service.dart';
+import '../config/api_config.dart';
+import 'package:intl/intl.dart';
+import 'portal_placeholder_screen.dart';
 
 /// Offender portal — no login required.
 /// Accessed via a secure URL sent by email notification.
 class OffenderPortalScreen extends StatefulWidget {
-  const OffenderPortalScreen({super.key});
+  final int? incidentId;
+  const OffenderPortalScreen({super.key, this.incidentId});
 
   @override
   State<OffenderPortalScreen> createState() => _OffenderPortalScreenState();
@@ -17,21 +25,108 @@ class _OffenderPortalScreenState extends State<OffenderPortalScreen>
   bool _paymentDone = false;
   final _disputeController = TextEditingController();
 
+  model.Incident? _incident;
+  model.Camera? _camera;
+  bool _isLoading = true;
+  String? _error;
+  VideoPlayerController? _videoController;
+
   @override
   void initState() {
     super.initState();
     _paymentTabController = TabController(length: 3, vsync: this);
+    _loadData();
+  }
+
+  Future<void> _loadData() async {
+    // Try to get from constructor first, then URL
+    String? idParam = widget.incidentId?.toString();
+    if (idParam == null) {
+      idParam = Uri.base.queryParameters['id'];
+    }
+
+    if (idParam == null) {
+      setState(() {
+        _isLoading = false;
+        _error = 'Invalid Incident ID';
+      });
+      return;
+    }
+
+    final id = int.tryParse(idParam);
+    if (id == null) {
+      setState(() {
+        _isLoading = false;
+        _error = 'Invalid Incident ID format';
+      });
+      return;
+    }
+
+    final incident = await ApiService.getIncident(id);
+    if (incident == null) {
+      setState(() {
+        _isLoading = false;
+        _error = 'Incident not found';
+      });
+      return;
+    }
+
+    final camera = await ApiService.getCamera(incident.cameraId);
+
+    if (mounted) {
+      setState(() {
+        _incident = incident;
+        _camera = camera;
+        _isLoading = false;
+      });
+
+      _initVideo(incident.videoPath);
+    }
+  }
+
+  void _initVideo(String filename) {
+    _videoController = VideoPlayerController.networkUrl(
+        Uri.parse(ApiConfig.getVideoUrl(filename)),
+      )
+      ..initialize().then((_) {
+        if (mounted) setState(() {});
+      });
   }
 
   @override
   void dispose() {
     _paymentTabController.dispose();
     _disputeController.dispose();
+    _videoController?.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
+    if (_isLoading) {
+      return const PortalPlaceholderScreen(
+        title: 'Connecting to CLEAR Services',
+        message: 'Please wait while we retrieve your incident details...',
+        iconLabel: 'LOADING',
+        isLoading: true,
+      );
+    }
+
+    if (_error != null) {
+      return PortalPlaceholderScreen(
+        title:
+            _error == 'Invalid Incident ID'
+                ? 'Access Restricted'
+                : 'Connection Error',
+        message:
+            _error == 'Invalid Incident ID'
+                ? 'Please use the secure link provided in your notification email to view this incident.'
+                : 'We encountered an issue connecting to the database. Please try again later.',
+        iconLabel: _error == 'Invalid Incident ID' ? 'ID MISSING' : 'OFFLINE',
+        onRetry: _loadData,
+      );
+    }
+
     return Scaffold(
       backgroundColor: AppColors.background,
       body: Column(
@@ -231,15 +326,18 @@ class _OffenderPortalScreenState extends State<OffenderPortalScreen>
   }
 
   Widget _buildIncidentCard() {
+    final dateFormat = DateFormat('dd MMMM yyyy');
+    final timeFormat = DateFormat('HH:mm:ss');
+
     final details = [
-      ['Incident ID', 'INC-001'],
-      ['Date', '25 February 2026'],
-      ['Time', '14:32:15'],
-      ['Location', 'Central Park East'],
-      ['Camera', 'Camera 7 - Central Park East'],
-      ['Offence', 'Littering'],
-      ['Status', 'Confirmed'],
-      ['Fine', 'R 500.00'],
+      ['Incident ID', 'INC-${_incident!.id.toString().padLeft(3, '0')}'],
+      ['Date', dateFormat.format(_incident!.effectiveDate)],
+      ['Time', timeFormat.format(_incident!.effectiveDate)],
+      ['Location', _camera?.location ?? 'Unknown'],
+      ['Camera', _camera?.cameraName ?? 'Camera ${_incident!.cameraId}'],
+      ['Offence', _incident!.incidentType],
+      ['Status', _incident!.status],
+      ['Fine', '5 USD'],
     ];
 
     return _card(
@@ -288,113 +386,30 @@ class _OffenderPortalScreenState extends State<OffenderPortalScreen>
       child: Column(
         children: [
           Container(
-            height: 200,
+            height: 300,
+            width: double.infinity,
             decoration: BoxDecoration(
               color: Colors.black,
               borderRadius: BorderRadius.circular(6),
             ),
-            child: Stack(
-              children: [
-                Container(
-                  decoration: BoxDecoration(
-                    borderRadius: BorderRadius.circular(6),
-                    gradient: const LinearGradient(
-                      begin: Alignment.topCenter,
-                      end: Alignment.bottomCenter,
-                      colors: [Color(0xFF1A1A2E), Color(0xFF0D0D1A)],
-                    ),
-                  ),
-                  child: Center(
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(
-                          Icons.play_circle_outline,
-                          color: AppColors.textMuted.withValues(alpha: 0.5),
-                          size: 56,
-                        ),
-                        const SizedBox(height: 8),
-                        const Text(
-                          'Click to play evidence footage',
-                          style: TextStyle(
-                            color: AppColors.textMuted,
-                            fontSize: 12,
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(6),
+              child:
+                  (_videoController != null &&
+                          _videoController!.value.isInitialized)
+                      ? Stack(
+                        alignment: Alignment.center,
+                        children: [
+                          AspectRatio(
+                            aspectRatio: _videoController!.value.aspectRatio,
+                            child: VideoPlayer(_videoController!),
                           ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-                Positioned(
-                  top: 8,
-                  left: 8,
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 7,
-                      vertical: 3,
-                    ),
-                    decoration: BoxDecoration(
-                      color: Colors.red.withValues(alpha: 0.85),
-                      borderRadius: BorderRadius.circular(4),
-                    ),
-                    child: const Text(
-                      '● EVIDENCE',
-                      style: TextStyle(
-                        color: Colors.white,
-                        fontSize: 10,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                  ),
-                ),
-                Positioned(
-                  left: 0,
-                  right: 0,
-                  bottom: 0,
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 12,
-                      vertical: 8,
-                    ),
-                    decoration: BoxDecoration(
-                      borderRadius: const BorderRadius.vertical(
-                        bottom: Radius.circular(6),
-                      ),
-                      gradient: LinearGradient(
-                        begin: Alignment.topCenter,
-                        end: Alignment.bottomCenter,
-                        colors: [
-                          Colors.transparent,
-                          Colors.black.withValues(alpha: 0.85),
+                          _buildVideoControls(),
                         ],
+                      )
+                      : const Center(
+                        child: CircularProgressIndicator(color: Colors.white),
                       ),
-                    ),
-                    child: Row(
-                      children: const [
-                        Icon(
-                          Icons.play_arrow,
-                          color: AppColors.textPrimary,
-                          size: 20,
-                        ),
-                        SizedBox(width: 8),
-                        Text(
-                          '0:00 / 0:12',
-                          style: TextStyle(
-                            color: AppColors.textSecondary,
-                            fontSize: 11,
-                          ),
-                        ),
-                        Spacer(),
-                        Icon(
-                          Icons.crop_free,
-                          color: AppColors.textSecondary,
-                          size: 16,
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              ],
             ),
           ),
           const SizedBox(height: 10),
@@ -405,6 +420,131 @@ class _OffenderPortalScreenState extends State<OffenderPortalScreen>
             textAlign: TextAlign.center,
           ),
         ],
+      ),
+    );
+  }
+
+  Widget _buildVideoControls({bool isFullScreen = false}) {
+    return Stack(
+      children: [
+        GestureDetector(
+          onTap: () {
+            setState(() {
+              _videoController!.value.isPlaying
+                  ? _videoController!.pause()
+                  : _videoController!.play();
+            });
+          },
+          child: Container(
+            color: Colors.transparent,
+            child: Center(
+              child:
+                  !_videoController!.value.isPlaying
+                      ? Icon(
+                        Icons.play_arrow,
+                        color: Colors.white.withValues(alpha: 0.7),
+                        size: 50,
+                      )
+                      : const SizedBox.shrink(),
+            ),
+          ),
+        ),
+        Positioned(
+          bottom: 0,
+          left: 0,
+          right: 0,
+          child: Container(
+            height: 40,
+            padding: const EdgeInsets.symmetric(horizontal: 8),
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.bottomCenter,
+                end: Alignment.topCenter,
+                colors: [
+                  Colors.black.withValues(alpha: 0.8),
+                  Colors.transparent,
+                ],
+              ),
+            ),
+            child: Row(
+              children: [
+                IconButton(
+                  icon: Icon(
+                    _videoController!.value.isPlaying
+                        ? Icons.pause
+                        : Icons.play_arrow,
+                    color: Colors.white,
+                    size: 20,
+                  ),
+                  onPressed: () {
+                    setState(() {
+                      _videoController!.value.isPlaying
+                          ? _videoController!.pause()
+                          : _videoController!.play();
+                    });
+                  },
+                ),
+                Expanded(
+                  child: VideoProgressIndicator(
+                    _videoController!,
+                    allowScrubbing: true,
+                    colors: const VideoProgressColors(
+                      playedColor: AppColors.brandBlue,
+                      bufferedColor: Colors.white24,
+                      backgroundColor: Colors.white10,
+                    ),
+                  ),
+                ),
+                IconButton(
+                  icon: Icon(
+                    isFullScreen ? Icons.fullscreen_exit : Icons.fullscreen,
+                    color: Colors.white,
+                    size: 20,
+                  ),
+                  onPressed:
+                      isFullScreen
+                          ? () => Navigator.of(context).pop()
+                          : _toggleFullScreen,
+                ),
+              ],
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  void _toggleFullScreen() {
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder:
+            (context) => Scaffold(
+              backgroundColor: Colors.black,
+              body: Center(
+                child: Stack(
+                  alignment: Alignment.center,
+                  children: [
+                    AspectRatio(
+                      aspectRatio: _videoController!.value.aspectRatio,
+                      child: VideoPlayer(_videoController!),
+                    ),
+                    _buildVideoControls(isFullScreen: true),
+                    Positioned(
+                      top: 40,
+                      right: 20,
+                      child: IconButton(
+                        icon: const Icon(
+                          Icons.close,
+                          color: Colors.white,
+                          size: 30,
+                        ),
+                        onPressed: () => Navigator.of(context).pop(),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
       ),
     );
   }
