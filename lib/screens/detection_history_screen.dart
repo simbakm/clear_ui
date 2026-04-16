@@ -1,15 +1,114 @@
 import 'package:flutter/material.dart';
+import 'package:intl/intl.dart';
 import '../theme/app_theme.dart';
+import '../services/api_service.dart';
+import '../models/incident.dart';
 import 'video_analysis_screen.dart';
 
-class DetectionHistoryScreen extends StatelessWidget {
+class DetectionHistoryScreen extends StatefulWidget {
   /// Called when user taps "View" — navigates to Video Analysis with that incident
   final void Function(IncidentModel)? onOpenIncident;
 
   const DetectionHistoryScreen({super.key, this.onOpenIncident});
 
   @override
+  State<DetectionHistoryScreen> createState() => _DetectionHistoryScreenState();
+}
+
+class _DetectionHistoryScreenState extends State<DetectionHistoryScreen> {
+  static const int _pageSize = 10;
+  final DateFormat _dateFormat = DateFormat('yyyy-MM-dd');
+  final DateFormat _timeFormat = DateFormat('HH:mm:ss');
+  final List<String> _filters = const [
+    'All',
+    'PENDING',
+    'CONFIRMED',
+    'REJECTED',
+    'ESCALATED',
+  ];
+
+  bool _isLoading = false;
+  String? _error;
+  List<Incident> _incidents = [];
+  String _statusFilter = 'All';
+  bool _sortAscending = false;
+  int _pageIndex = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadIncidents();
+  }
+
+  Future<void> _loadIncidents() async {
+    setState(() {
+      _isLoading = true;
+      _error = null;
+    });
+    try {
+      final incidents = await ApiService.getIncidents();
+      if (!mounted) return;
+      setState(() {
+        _incidents = incidents;
+        _isLoading = false;
+        _pageIndex = 0;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _error = 'Failed to load incidents.';
+        _isLoading = false;
+      });
+    }
+  }
+
+  List<Incident> get _filteredIncidents {
+    List<Incident> list = List.from(_incidents);
+    if (_statusFilter != 'All') {
+      list = list
+          .where((i) => _statusOf(i) == _statusFilter)
+          .toList();
+    }
+    list.sort((a, b) {
+      final aDate = a.createdAt;
+      final bDate = b.createdAt;
+      return _sortAscending ? aDate.compareTo(bDate) : bDate.compareTo(aDate);
+    });
+    return list;
+  }
+
+  String _statusOf(Incident incident) {
+    final status = incident.status.toUpperCase();
+    if (status.isEmpty || status == 'UNKNOWN') return 'PENDING';
+    return status;
+  }
+
+  IncidentModel _toModel(Incident incident) {
+    final date = incident.createdAt;
+    final confidence = (incident.confidenceScore * 100).round();
+    final status = _statusOf(incident).toLowerCase();
+    return IncidentModel(
+      id: 'INC-${incident.id.toString().padLeft(3, '0')}',
+      type: incident.incidentType.isEmpty ? 'Unknown' : incident.incidentType,
+      date: _dateFormat.format(date),
+      time: _timeFormat.format(date),
+      location: 'Unknown',
+      cameraId: incident.cameraId.toString(),
+      cameraName:
+          incident.cameraId == 0 ? 'Unknown Camera' : 'Camera ${incident.cameraId}',
+      confidence: confidence,
+      status: status.toLowerCase(),
+      duration: '-',
+    );
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final filtered = _filteredIncidents;
+    final start = _pageIndex * _pageSize;
+    final end = (start + _pageSize).clamp(0, filtered.length);
+    final shown = filtered.sublist(start, end);
+
     return SingleChildScrollView(
       padding: const EdgeInsets.all(20),
       child: Container(
@@ -37,11 +136,24 @@ class DetectionHistoryScreen extends StatelessWidget {
                 ),
                 const Spacer(),
                 // Filter chips
-                _filterChip('All', true),
-                const SizedBox(width: 6),
-                _filterChip('Confirmed', false),
-                const SizedBox(width: 6),
-                _filterChip('False Positive', false),
+                ..._filters.expand((label) {
+                  final selected = _statusFilter == label;
+                  return [
+                    GestureDetector(
+                      onTap: () {
+                        setState(() {
+                          _statusFilter = label;
+                          _pageIndex = 0;
+                        });
+                      },
+                      child: _filterChip(label, selected),
+                    ),
+                    const SizedBox(width: 6),
+                  ];
+                }).toList()
+                  ..removeLast(),
+                const SizedBox(width: 12),
+                _sortControl(),
               ],
             ),
             const SizedBox(height: 6),
@@ -74,12 +186,72 @@ class DetectionHistoryScreen extends StatelessWidget {
             const SizedBox(height: 4),
 
             // Rows
-            ...mockIncidents.map(
-              (inc) => _IncidentRow(
-                incident: inc,
-                onView: () => onOpenIncident?.call(inc),
+            if (_isLoading)
+              const Padding(
+                padding: EdgeInsets.all(16),
+                child: Center(child: CircularProgressIndicator(strokeWidth: 2)),
+              )
+            else if (_error != null)
+              Padding(
+                padding: const EdgeInsets.all(16),
+                child: Text(
+                  _error!,
+                  style: const TextStyle(
+                    color: AppColors.alertHigh,
+                    fontSize: 12,
+                  ),
+                ),
+              )
+            else if (shown.isEmpty)
+              const Padding(
+                padding: EdgeInsets.all(16),
+                child: Text(
+                  'No incidents found.',
+                  style: TextStyle(color: AppColors.textMuted, fontSize: 12),
+                ),
+              )
+            else
+              ...shown.map(
+                (inc) {
+                  final model = _toModel(inc);
+                  return _IncidentRow(
+                    incident: model,
+                    onView: () => widget.onOpenIncident?.call(model),
+                  );
+                },
               ),
-            ),
+            if (!_isLoading && _error == null && filtered.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(top: 12),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.end,
+                  children: [
+                    Text(
+                      '${start + 1}-${end} of ${filtered.length}',
+                      style: const TextStyle(
+                        color: AppColors.textMuted,
+                        fontSize: 11,
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    TextButton(
+                      onPressed:
+                          _pageIndex == 0
+                              ? null
+                              : () => setState(() => _pageIndex -= 1),
+                      child: const Text('Previous'),
+                    ),
+                    const SizedBox(width: 4),
+                    TextButton(
+                      onPressed:
+                          end >= filtered.length
+                              ? null
+                              : () => setState(() => _pageIndex += 1),
+                      child: const Text('Next'),
+                    ),
+                  ],
+                ),
+              ),
           ],
         ),
       ),
@@ -121,6 +293,63 @@ class DetectionHistoryScreen extends StatelessWidget {
       ),
     );
   }
+
+  Widget _sortControl() {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+      decoration: BoxDecoration(
+        color: AppColors.surface,
+        borderRadius: BorderRadius.circular(4),
+        border: Border.all(color: AppColors.cardBorder),
+      ),
+      child: Row(
+        children: [
+          const Text(
+            'Sort',
+            style: TextStyle(color: AppColors.textMuted, fontSize: 11),
+          ),
+          const SizedBox(width: 8),
+          GestureDetector(
+            onTap: () {
+              setState(() {
+                _sortAscending = true;
+                _pageIndex = 0;
+              });
+            },
+            child: Text(
+              'Oldest',
+              style: TextStyle(
+                color:
+                    _sortAscending ? AppColors.brandBlue : AppColors.textMuted,
+                fontSize: 11,
+                fontWeight:
+                    _sortAscending ? FontWeight.w600 : FontWeight.normal,
+              ),
+            ),
+          ),
+          const SizedBox(width: 6),
+          GestureDetector(
+            onTap: () {
+              setState(() {
+                _sortAscending = false;
+                _pageIndex = 0;
+              });
+            },
+            child: Text(
+              'Newest',
+              style: TextStyle(
+                color:
+                    !_sortAscending ? AppColors.brandBlue : AppColors.textMuted,
+                fontSize: 11,
+                fontWeight:
+                    !_sortAscending ? FontWeight.w600 : FontWeight.normal,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 }
 
 class _IncidentRow extends StatefulWidget {
@@ -139,8 +368,10 @@ class _IncidentRowState extends State<_IncidentRow> {
     switch (widget.incident.status) {
       case 'confirmed':
         return AppColors.activeGreen;
-      case 'false_positive':
+      case 'rejected':
         return AppColors.alertHigh;
+      case 'escalated':
+        return AppColors.warningOrange;
       default:
         return AppColors.warningOrange;
     }
@@ -150,8 +381,10 @@ class _IncidentRowState extends State<_IncidentRow> {
     switch (widget.incident.status) {
       case 'confirmed':
         return 'Confirmed';
-      case 'false_positive':
-        return 'False Positive';
+      case 'rejected':
+        return 'Rejected';
+      case 'escalated':
+        return 'Escalated';
       default:
         return 'Pending';
     }

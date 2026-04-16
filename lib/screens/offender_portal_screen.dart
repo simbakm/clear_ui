@@ -1,10 +1,9 @@
 import 'package:flutter/material.dart';
-import 'package:video_player/video_player.dart';
 import '../theme/app_theme.dart';
 import '../models/camera.dart' as model;
 import '../models/incident.dart' as model;
 import '../services/api_service.dart';
-import '../config/api_config.dart';
+import '../widgets/incident_video_player.dart';
 import 'package:intl/intl.dart';
 import 'portal_placeholder_screen.dart';
 
@@ -24,17 +23,19 @@ class _OffenderPortalScreenState extends State<OffenderPortalScreen>
   bool _disputeSubmitted = false;
   bool _paymentDone = false;
   final _disputeController = TextEditingController();
+  String _disputeReason = 'Wrong person identified';
+  bool _isSubmittingDispute = false;
 
   model.Incident? _incident;
   model.Camera? _camera;
   bool _isLoading = true;
   String? _error;
-  VideoPlayerController? _videoController;
 
   @override
   void initState() {
     super.initState();
     _paymentTabController = TabController(length: 3, vsync: this);
+    _disputeController.addListener(_onDisputeTextChanged);
     _loadData();
   }
 
@@ -80,25 +81,21 @@ class _OffenderPortalScreenState extends State<OffenderPortalScreen>
         _isLoading = false;
       });
 
-      _initVideo(incident.videoPath);
     }
-  }
-
-  void _initVideo(String filename) {
-    _videoController = VideoPlayerController.networkUrl(
-        Uri.parse(ApiConfig.getVideoUrl(filename)),
-      )
-      ..initialize().then((_) {
-        if (mounted) setState(() {});
-      });
   }
 
   @override
   void dispose() {
     _paymentTabController.dispose();
+    _disputeController.removeListener(_onDisputeTextChanged);
     _disputeController.dispose();
-    _videoController?.dispose();
     super.dispose();
+  }
+
+  void _onDisputeTextChanged() {
+    if (mounted) {
+      setState(() {});
+    }
   }
 
   @override
@@ -145,29 +142,26 @@ class _OffenderPortalScreenState extends State<OffenderPortalScreen>
                       _buildNoticeBanner(),
                       const SizedBox(height: 24),
                       // Two-column layout
-                      Row(
-                        crossAxisAlignment: CrossAxisAlignment.start,
+                      Column(
                         children: [
-                          // Left: incident details + evidence
-                          Expanded(
-                            flex: 5,
-                            child: Column(
+                          IntrinsicHeight(
+                            child: Row(
+                              crossAxisAlignment: CrossAxisAlignment.stretch,
                               children: [
-                                _buildIncidentCard(),
-                                const SizedBox(height: 16),
-                                _buildVideoEvidence(),
+                                Expanded(flex: 5, child: _buildIncidentCard()),
+                                const SizedBox(width: 20),
+                                Expanded(flex: 5, child: _buildPaymentSection()),
                               ],
                             ),
                           ),
-                          const SizedBox(width: 20),
-                          // Right: payment + dispute
-                          Expanded(
-                            flex: 5,
-                            child: Column(
+                          const SizedBox(height: 16),
+                          IntrinsicHeight(
+                            child: Row(
+                              crossAxisAlignment: CrossAxisAlignment.stretch,
                               children: [
-                                _buildPaymentSection(),
-                                const SizedBox(height: 16),
-                                _buildDisputeSection(),
+                                Expanded(flex: 5, child: _buildVideoEvidence()),
+                                const SizedBox(width: 20),
+                                Expanded(flex: 5, child: _buildDisputeSection()),
                               ],
                             ),
                           ),
@@ -385,32 +379,9 @@ class _OffenderPortalScreenState extends State<OffenderPortalScreen>
       iconColor: AppColors.statPurple,
       child: Column(
         children: [
-          Container(
+          IncidentVideoPlayer(
+            videoPath: _incident?.videoPath,
             height: 300,
-            width: double.infinity,
-            decoration: BoxDecoration(
-              color: Colors.black,
-              borderRadius: BorderRadius.circular(6),
-            ),
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(6),
-              child:
-                  (_videoController != null &&
-                          _videoController!.value.isInitialized)
-                      ? Stack(
-                        alignment: Alignment.center,
-                        children: [
-                          AspectRatio(
-                            aspectRatio: _videoController!.value.aspectRatio,
-                            child: VideoPlayer(_videoController!),
-                          ),
-                          _buildVideoControls(),
-                        ],
-                      )
-                      : const Center(
-                        child: CircularProgressIndicator(color: Colors.white),
-                      ),
-            ),
           ),
           const SizedBox(height: 10),
           const Text(
@@ -420,131 +391,6 @@ class _OffenderPortalScreenState extends State<OffenderPortalScreen>
             textAlign: TextAlign.center,
           ),
         ],
-      ),
-    );
-  }
-
-  Widget _buildVideoControls({bool isFullScreen = false}) {
-    return Stack(
-      children: [
-        GestureDetector(
-          onTap: () {
-            setState(() {
-              _videoController!.value.isPlaying
-                  ? _videoController!.pause()
-                  : _videoController!.play();
-            });
-          },
-          child: Container(
-            color: Colors.transparent,
-            child: Center(
-              child:
-                  !_videoController!.value.isPlaying
-                      ? Icon(
-                        Icons.play_arrow,
-                        color: Colors.white.withValues(alpha: 0.7),
-                        size: 50,
-                      )
-                      : const SizedBox.shrink(),
-            ),
-          ),
-        ),
-        Positioned(
-          bottom: 0,
-          left: 0,
-          right: 0,
-          child: Container(
-            height: 40,
-            padding: const EdgeInsets.symmetric(horizontal: 8),
-            decoration: BoxDecoration(
-              gradient: LinearGradient(
-                begin: Alignment.bottomCenter,
-                end: Alignment.topCenter,
-                colors: [
-                  Colors.black.withValues(alpha: 0.8),
-                  Colors.transparent,
-                ],
-              ),
-            ),
-            child: Row(
-              children: [
-                IconButton(
-                  icon: Icon(
-                    _videoController!.value.isPlaying
-                        ? Icons.pause
-                        : Icons.play_arrow,
-                    color: Colors.white,
-                    size: 20,
-                  ),
-                  onPressed: () {
-                    setState(() {
-                      _videoController!.value.isPlaying
-                          ? _videoController!.pause()
-                          : _videoController!.play();
-                    });
-                  },
-                ),
-                Expanded(
-                  child: VideoProgressIndicator(
-                    _videoController!,
-                    allowScrubbing: true,
-                    colors: const VideoProgressColors(
-                      playedColor: AppColors.brandBlue,
-                      bufferedColor: Colors.white24,
-                      backgroundColor: Colors.white10,
-                    ),
-                  ),
-                ),
-                IconButton(
-                  icon: Icon(
-                    isFullScreen ? Icons.fullscreen_exit : Icons.fullscreen,
-                    color: Colors.white,
-                    size: 20,
-                  ),
-                  onPressed:
-                      isFullScreen
-                          ? () => Navigator.of(context).pop()
-                          : _toggleFullScreen,
-                ),
-              ],
-            ),
-          ),
-        ),
-      ],
-    );
-  }
-
-  void _toggleFullScreen() {
-    Navigator.of(context).push(
-      MaterialPageRoute(
-        builder:
-            (context) => Scaffold(
-              backgroundColor: Colors.black,
-              body: Center(
-                child: Stack(
-                  alignment: Alignment.center,
-                  children: [
-                    AspectRatio(
-                      aspectRatio: _videoController!.value.aspectRatio,
-                      child: VideoPlayer(_videoController!),
-                    ),
-                    _buildVideoControls(isFullScreen: true),
-                    Positioned(
-                      top: 40,
-                      right: 20,
-                      child: IconButton(
-                        icon: const Icon(
-                          Icons.close,
-                          color: Colors.white,
-                          size: 30,
-                        ),
-                        onPressed: () => Navigator.of(context).pop(),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
       ),
     );
   }
@@ -569,7 +415,7 @@ class _OffenderPortalScreenState extends State<OffenderPortalScreen>
               ),
               const SizedBox(height: 6),
               const Text(
-                'Your fine of R 500.00 has been paid.\nA receipt will be emailed to you.',
+                'Your fine of usd 5.00 has been paid.\nA receipt will be emailed to you.',
                 textAlign: TextAlign.center,
                 style: TextStyle(color: AppColors.textSecondary, fontSize: 13),
               ),
@@ -820,6 +666,26 @@ class _OffenderPortalScreenState extends State<OffenderPortalScreen>
                 style: TextStyle(color: AppColors.textMuted, fontSize: 12),
               ),
               const SizedBox(height: 12),
+              const Text(
+                'Choose a reason',
+                style: TextStyle(
+                  color: AppColors.textSecondary,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const SizedBox(height: 6),
+              _buildDisputeReasonDropdown(),
+              const SizedBox(height: 12),
+              const Text(
+                'Description',
+                style: TextStyle(
+                  color: AppColors.textSecondary,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const SizedBox(height: 6),
               TextField(
                 controller: _disputeController,
                 maxLines: 5,
@@ -858,11 +724,27 @@ class _OffenderPortalScreenState extends State<OffenderPortalScreen>
               SizedBox(
                 width: double.infinity,
                 child: ElevatedButton.icon(
-                  onPressed: () => setState(() => _disputeSubmitted = true),
-                  icon: const Icon(Icons.send_outlined, size: 16),
-                  label: const Text(
-                    'Submit Dispute',
-                    style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+                  onPressed:
+                      _disputeController.text.trim().isEmpty
+                          ? null
+                          : _submitDispute,
+                  icon:
+                      _isSubmittingDispute
+                          ? const SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color: Colors.white,
+                            ),
+                          )
+                          : const Icon(Icons.send_outlined, size: 16),
+                  label: Text(
+                    _isSubmittingDispute ? 'Submitting...' : 'Submit Dispute',
+                    style: const TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                    ),
                   ),
                   style: ElevatedButton.styleFrom(
                     backgroundColor: AppColors.statPurple,
@@ -878,6 +760,84 @@ class _OffenderPortalScreenState extends State<OffenderPortalScreen>
             ],
           ),
         );
+  }
+
+  Widget _buildDisputeReasonDropdown() {
+    const reasons = [
+      'Wrong person identified',
+      'The system misclassified the situation',
+      'The incident was accidental',
+      'Fine already paid or duplicate fine issued',
+      'Others',
+    ];
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12),
+      decoration: BoxDecoration(
+        color: AppColors.surface,
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(color: AppColors.cardBorder),
+      ),
+      child: DropdownButtonHideUnderline(
+        child: DropdownButton<String>(
+          value: _disputeReason,
+          isExpanded: true,
+          dropdownColor: AppColors.cardBackground,
+          iconEnabledColor: AppColors.textMuted,
+          style: const TextStyle(color: AppColors.textPrimary, fontSize: 13),
+          items:
+              reasons
+                  .map(
+                    (reason) => DropdownMenuItem<String>(
+                      value: reason,
+                      child: Text(reason),
+                    ),
+                  )
+                  .toList(),
+          onChanged: (value) {
+            if (value == null) return;
+            setState(() {
+              _disputeReason = value;
+            });
+          },
+        ),
+      ),
+    );
+  }
+
+  Future<void> _submitDispute() async {
+    if (_incident == null) return;
+    final description = _disputeController.text.trim();
+    if (description.isEmpty) return;
+    if (_isSubmittingDispute) return;
+
+    setState(() {
+      _isSubmittingDispute = true;
+    });
+
+    final ok = await ApiService.submitDispute(
+      incidentId: _incident!.id,
+      reason: _disputeReason,
+      description: description,
+      status: 'PENDING',
+    );
+
+    if (!mounted) return;
+    setState(() {
+      _isSubmittingDispute = false;
+      _disputeSubmitted = ok;
+    });
+
+    if (!ok) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Failed to submit dispute. Please check your connection and try again.',
+          ),
+          backgroundColor: AppColors.alertHigh,
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    }
   }
 
   Widget _card({

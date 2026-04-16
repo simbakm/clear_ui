@@ -1,5 +1,10 @@
 import 'package:flutter/material.dart';
+import 'package:intl/intl.dart';
 import '../theme/app_theme.dart';
+import '../services/api_service.dart';
+import '../models/incident.dart';
+import '../models/dispute.dart';
+import '../widgets/incident_video_player.dart';
 
 // Shared incident model used by Video Analysis, Detection History, and Alerts
 class IncidentModel {
@@ -32,68 +37,6 @@ class IncidentModel {
   });
 }
 
-final List<IncidentModel> mockIncidents = [
-  const IncidentModel(
-    id: 'INC-001',
-    type: 'Littering',
-    date: '2026-02-25',
-    time: '14:32:15',
-    location: 'S-Block Entrance',
-    cameraId: 'CAM-S01',
-    cameraName: 'S-Block Entrance Cam 1',
-    confidence: 94,
-    status: 'confirmed',
-    offenderName: 'Simbarashe Sandi',
-    duration: '00:00:12',
-    argumentMessage: '"This was unintentional as the trash bin was full."',
-  ),
-  const IncidentModel(
-    id: 'INC-002',
-    type: 'Illegal Dumping',
-    date: '2026-02-25',
-    time: '13:45:22',
-    location: 'Maingate',
-    cameraId: 'CAM-MG1',
-    cameraName: 'Maingate Camera 1',
-    confidence: 87,
-    status: 'confirmed',
-    offenderName: 'John Mudemo',
-    duration: '00:02:34',
-    argumentMessage:
-        '"I was clearing some debris but will dispose of it properly next time."',
-  ),
-  const IncidentModel(
-    id: 'INC-003',
-    type: 'Littering',
-    date: '2026-02-25',
-    time: '12:18:09',
-    location: 'N-Block',
-    cameraId: 'CAM-N01',
-    cameraName: 'N-Block Camera 1',
-    confidence: 76,
-    status: 'confirmed',
-    offenderName: 'Sandra Mbudzi',
-    duration: '00:00:08',
-    argumentMessage:
-        '"I accidentally dropped my wrapper while rushing to class."',
-  ),
-  const IncidentModel(
-    id: 'INC-004',
-    type: 'Littering',
-    date: '2026-02-24',
-    time: '09:05:44',
-    location: 'Multipurpose-hall',
-    cameraId: 'CAM-MPH1',
-    cameraName: 'Multipurpose-hall Cam 1',
-    confidence: 91,
-    status: 'confirmed',
-    offenderName: 'Blessing Musoni',
-    duration: '00:00:19',
-    argumentMessage:
-        '"Noticed others littering and assumed it was okay, I apologize."',
-  ),
-];
-
 class VideoAnalysisScreen extends StatefulWidget {
   final IncidentModel? preSelectedIncident;
   const VideoAnalysisScreen({super.key, this.preSelectedIncident});
@@ -103,17 +46,39 @@ class VideoAnalysisScreen extends StatefulWidget {
 }
 
 class _VideoAnalysisScreenState extends State<VideoAnalysisScreen> {
-  IncidentModel? _selectedIncident;
-  final Map<String, String> _incidentStatus = {};
-  final Map<String, bool> _facialRecogDone = {};
+  static const int _pageSize = 4;
+  final DateFormat _dateFormat = DateFormat('yyyy-MM-dd');
+  final DateFormat _timeFormat = DateFormat('HH:mm:ss');
+
+  bool _isLoading = false;
+  String? _error;
+  int _pageIndex = 0;
+  List<Incident> _incidents = [];
+  Incident? _selectedIncident;
+  int? _pendingSelectId;
+
+  bool _isLoadingDisputes = false;
+  List<Dispute> _disputes = [];
+  final Map<int, String> _offenderNameCache = {};
+
+  void _showActionToast(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
+  }
 
   @override
   void initState() {
     super.initState();
-    _selectedIncident = widget.preSelectedIncident;
-    for (final inc in mockIncidents) {
-      _incidentStatus[inc.id] = inc.status;
+    if (widget.preSelectedIncident != null) {
+      final idStr = widget.preSelectedIncident!.id.replaceAll('INC-', '');
+      _pendingSelectId = int.tryParse(idStr);
     }
+    _loadIncidents();
   }
 
   @override
@@ -121,16 +86,109 @@ class _VideoAnalysisScreenState extends State<VideoAnalysisScreen> {
     super.didUpdateWidget(oldWidget);
     if (widget.preSelectedIncident != null &&
         widget.preSelectedIncident != oldWidget.preSelectedIncident) {
-      setState(() => _selectedIncident = widget.preSelectedIncident);
+      final idStr = widget.preSelectedIncident!.id.replaceAll('INC-', '');
+      final id = int.tryParse(idStr);
+      if (id != null) {
+        _pendingSelectId = id;
+        final found = _incidents.where((i) => i.id == id).toList();
+        if (found.isNotEmpty) {
+          _selectIncident(found.first);
+        }
+      }
     }
+  }
+
+  Future<void> _loadIncidents() async {
+    setState(() {
+      _isLoading = true;
+      _error = null;
+    });
+    try {
+      final incidents = await ApiService.getIncidents();
+      if (!mounted) return;
+      incidents.sort((a, b) => b.createdAt.compareTo(a.createdAt));
+      setState(() {
+        _incidents = incidents;
+        _isLoading = false;
+        _pageIndex = 0;
+        _selectedIncident = null;
+        _disputes = [];
+        _isLoadingDisputes = false;
+      });
+      if (_pendingSelectId != null) {
+        final found = incidents.where((i) => i.id == _pendingSelectId).toList();
+        if (found.isNotEmpty) {
+          _selectIncident(found.first);
+          return;
+        }
+      }
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _error = 'Failed to load incidents.';
+        _isLoading = false;
+      });
+    }
+  }
+
+  void _selectIncident(Incident inc) {
+    setState(() => _selectedIncident = inc);
+    _loadDisputes(inc.id);
+    _loadOffenderName(inc.offenderId);
+  }
+
+  Future<void> _loadOffenderName(int? offenderId) async {
+    if (offenderId == null) return;
+    if (_offenderNameCache.containsKey(offenderId)) return;
+    final offender = await ApiService.getOffender(offenderId);
+    if (!mounted) return;
+    if (offender != null) {
+      setState(() {
+        _offenderNameCache[offenderId] = offender.name;
+      });
+    }
+  }
+
+  Future<void> _loadDisputes(int incidentId) async {
+    setState(() {
+      _isLoadingDisputes = true;
+      _disputes = [];
+    });
+    final disputes = await ApiService.getDisputes(incidentId);
+    if (!mounted) return;
+    setState(() {
+      _disputes = disputes;
+      _isLoadingDisputes = false;
+    });
+
+    for (final dispute in disputes) {
+      final offenderId = dispute.offenderId;
+      if (offenderId != null && !_offenderNameCache.containsKey(offenderId)) {
+        final offender = await ApiService.getOffender(offenderId);
+        if (!mounted) return;
+        if (offender != null) {
+          setState(() {
+            _offenderNameCache[offenderId] = offender.name;
+          });
+        }
+      }
+    }
+  }
+
+  String _statusOf(Incident incident) {
+    final status = incident.status.toUpperCase();
+    if (status.isEmpty || status == 'UNKNOWN') return 'PENDING';
+    return status;
   }
 
   Color _statusColor(String status) {
     switch (status) {
-      case 'confirmed':
+      case 'CONFIRMED':
         return AppColors.activeGreen;
-      case 'false_positive':
+      case 'REJECTED':
         return AppColors.alertHigh;
+      case 'ESCALATED':
+        return AppColors.warningOrange;
       default:
         return AppColors.warningOrange;
     }
@@ -138,17 +196,26 @@ class _VideoAnalysisScreenState extends State<VideoAnalysisScreen> {
 
   String _statusLabel(String status) {
     switch (status) {
-      case 'confirmed':
+      case 'CONFIRMED':
         return 'Confirmed';
-      case 'false_positive':
-        return 'False Positive';
+      case 'REJECTED':
+        return 'Rejected';
+      case 'ESCALATED':
+        return 'Escalated';
       default:
         return 'Pending Review';
     }
   }
 
+  String _incidentIdLabel(int id) => 'INC-${id.toString().padLeft(3, '0')}';
+
   @override
   Widget build(BuildContext context) {
+    final total = _incidents.length;
+    final start = _pageIndex * _pageSize;
+    final end = (start + _pageSize).clamp(0, total);
+    final pageItems = total == 0 ? <Incident>[] : _incidents.sublist(start, end);
+
     return Padding(
       padding: const EdgeInsets.all(20),
       child: Row(
@@ -195,7 +262,7 @@ class _VideoAnalysisScreenState extends State<VideoAnalysisScreen> {
                             borderRadius: BorderRadius.circular(10),
                           ),
                           child: Text(
-                            '${mockIncidents.length}',
+                            '$total',
                             style: const TextStyle(
                               color: AppColors.textSecondary,
                               fontSize: 11,
@@ -207,93 +274,157 @@ class _VideoAnalysisScreenState extends State<VideoAnalysisScreen> {
                   ),
                   const Divider(height: 1, color: AppColors.cardBorder),
                   Expanded(
-                    child: ListView.separated(
-                      padding: const EdgeInsets.all(8),
-                      itemCount: mockIncidents.length,
-                      separatorBuilder: (_, __) => const SizedBox(height: 4),
-                      itemBuilder: (context, i) {
-                        final inc = mockIncidents[i];
-                        final status = _incidentStatus[inc.id] ?? inc.status;
-                        final isSelected = _selectedIncident?.id == inc.id;
-                        return InkWell(
-                          onTap: () => setState(() => _selectedIncident = inc),
-                          borderRadius: BorderRadius.circular(6),
-                          child: AnimatedContainer(
-                            duration: const Duration(milliseconds: 200),
-                            padding: const EdgeInsets.all(12),
-                            decoration: BoxDecoration(
-                              color:
-                                  isSelected
-                                      ? AppColors.brandBlue.withValues(
-                                        alpha: 0.12,
-                                      )
-                                      : Colors.transparent,
-                              borderRadius: BorderRadius.circular(6),
-                              border: Border.all(
-                                color:
-                                    isSelected
-                                        ? AppColors.brandBlue.withValues(
-                                          alpha: 0.4,
-                                        )
-                                        : Colors.transparent,
+                    child:
+                        _isLoading
+                            ? const Center(
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                            : _error != null
+                            ? Center(
+                              child: Text(
+                                _error!,
+                                style: const TextStyle(
+                                  color: AppColors.alertHigh,
+                                  fontSize: 12,
+                                ),
                               ),
-                            ),
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Row(
-                                  children: [
-                                    Expanded(
-                                      child: Text(
-                                        inc.type,
-                                        style: TextStyle(
-                                          color:
-                                              isSelected
-                                                  ? AppColors.brandBlue
-                                                  : AppColors.textPrimary,
-                                          fontSize: 13,
-                                          fontWeight: FontWeight.w600,
-                                        ),
+                            )
+                            : ListView.separated(
+                              padding: const EdgeInsets.all(8),
+                              itemCount: pageItems.length,
+                              separatorBuilder: (_, __) => const SizedBox(height: 4),
+                              itemBuilder: (context, i) {
+                                final inc = pageItems[i];
+                                final status = _statusOf(inc);
+                                final isSelected = _selectedIncident?.id == inc.id;
+                                return InkWell(
+                                  onTap: () => _selectIncident(inc),
+                                  borderRadius: BorderRadius.circular(6),
+                                  child: AnimatedContainer(
+                                    duration: const Duration(milliseconds: 200),
+                                    padding: const EdgeInsets.all(12),
+                                    decoration: BoxDecoration(
+                                      color:
+                                          isSelected
+                                              ? AppColors.brandBlue.withValues(
+                                                alpha: 0.12,
+                                              )
+                                              : Colors.transparent,
+                                      borderRadius: BorderRadius.circular(6),
+                                      border: Border.all(
+                                        color:
+                                            isSelected
+                                                ? AppColors.brandBlue.withValues(
+                                                  alpha: 0.4,
+                                                )
+                                                : Colors.transparent,
                                       ),
                                     ),
-                                    _statusBadge(status),
-                                  ],
-                                ),
-                                const SizedBox(height: 4),
-                                Text(
-                                  '${inc.date} ${inc.time}',
-                                  style: const TextStyle(
-                                    color: AppColors.textMuted,
-                                    fontSize: 11,
+                                    child: Column(
+                                      crossAxisAlignment: CrossAxisAlignment.start,
+                                      children: [
+                                        Row(
+                                          children: [
+                                            Expanded(
+                                              child: Text(
+                                                inc.incidentType.isEmpty
+                                                    ? 'Unknown'
+                                                    : inc.incidentType,
+                                                style: TextStyle(
+                                                  color:
+                                                      isSelected
+                                                          ? AppColors.brandBlue
+                                                          : AppColors.textPrimary,
+                                                  fontSize: 13,
+                                                  fontWeight: FontWeight.w600,
+                                                ),
+                                              ),
+                                            ),
+                                            _statusBadge(status),
+                                          ],
+                                        ),
+                                        const SizedBox(height: 4),
+                                        Text(
+                                          '${_dateFormat.format(inc.createdAt)} ${_timeFormat.format(inc.createdAt)}',
+                                          style: const TextStyle(
+                                            color: AppColors.textMuted,
+                                            fontSize: 11,
+                                          ),
+                                        ),
+                                        Text(
+                                          'Camera ${inc.cameraId} · ${(inc.confidenceScore * 100).round()}% confidence',
+                                          style: const TextStyle(
+                                            color: AppColors.textMuted,
+                                            fontSize: 11,
+                                          ),
+                                          overflow: TextOverflow.ellipsis,
+                                        ),
+                                      ],
+                                    ),
                                   ),
-                                ),
-                                Text(
-                                  '${inc.cameraName} · ${inc.confidence}% confidence',
-                                  style: const TextStyle(
-                                    color: AppColors.textMuted,
-                                    fontSize: 11,
-                                  ),
-                                  overflow: TextOverflow.ellipsis,
-                                ),
-                              ],
+                                );
+                              },
+                            ),
+                  ),
+                  if (!_isLoading && _error == null && total > 0)
+                    Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 10,
+                      ),
+                      child: Row(
+                        children: [
+                          Text(
+                            '${start + 1}-${end} of $total',
+                            style: const TextStyle(
+                              color: AppColors.textMuted,
+                              fontSize: 11,
                             ),
                           ),
-                        );
-                      },
+                          const Spacer(),
+                          TextButton(
+                            onPressed:
+                                _pageIndex == 0
+                                    ? null
+                                    : () => setState(() => _pageIndex -= 1),
+                            child: const Text('Previous'),
+                          ),
+                          const SizedBox(width: 4),
+                          TextButton(
+                            onPressed:
+                                end >= total
+                                    ? null
+                                    : () => setState(() => _pageIndex += 1),
+                            child: const Text('Next'),
+                          ),
+                        ],
+                      ),
                     ),
-                  ),
                 ],
               ),
             ),
           ),
           const SizedBox(width: 16),
 
-          // ── Right: Detail Panel ──────────────────────────────────────
+          // ── Right: Detail Panel + Action Tab ─────────────────────────
           Expanded(
             child:
                 _selectedIncident == null
                     ? _buildEmptyState()
-                    : _buildDetailPanel(_selectedIncident!),
+                    : Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Expanded(
+                          flex: 3,
+                          child: _buildDetailPanel(_selectedIncident!),
+                        ),
+                        const SizedBox(width: 16),
+                        Expanded(
+                          flex: 1,
+                          child: _buildActionTab(),
+                        ),
+                      ],
+                    ),
           ),
         ],
       ),
@@ -318,7 +449,7 @@ class _VideoAnalysisScreenState extends State<VideoAnalysisScreen> {
             ),
             const SizedBox(height: 16),
             const Text(
-              'Select an incident to review',
+              'select incident to view',
               style: TextStyle(color: AppColors.textSecondary, fontSize: 16),
             ),
             const SizedBox(height: 6),
@@ -332,9 +463,127 @@ class _VideoAnalysisScreenState extends State<VideoAnalysisScreen> {
     );
   }
 
-  Widget _buildDetailPanel(IncidentModel inc) {
-    final status = _incidentStatus[inc.id] ?? inc.status;
-    final facialDone = _facialRecogDone[inc.id] ?? false;
+  Widget _buildActionTab() {
+    final hasSelection = _selectedIncident != null;
+    final hasArgument = !_isLoadingDisputes && _disputes.isNotEmpty;
+
+    return Container(
+      decoration: BoxDecoration(
+        color: AppColors.cardBackground,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: AppColors.cardBorder),
+      ),
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.tune, color: AppColors.brandBlue, size: 18),
+              const SizedBox(width: 8),
+              const Text(
+                'Actions',
+                style: TextStyle(
+                  color: AppColors.textPrimary,
+                  fontSize: 15,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          const Divider(height: 1, color: AppColors.cardBorder),
+          const SizedBox(height: 12),
+          SizedBox(
+            height: 44,
+            child: ElevatedButton.icon(
+              onPressed:
+                  hasSelection
+                      ? () => _showActionToast(
+                        'Rerun facial recognition (not wired yet).',
+                      )
+                      : null,
+              icon: const Icon(Icons.face_retouching_natural_outlined, size: 18),
+              label: const Text('Rerun facial recognition'),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: AppColors.brandBlue,
+                foregroundColor: Colors.white,
+                disabledBackgroundColor: AppColors.brandBlue.withValues(
+                  alpha: 0.25,
+                ),
+                disabledForegroundColor: Colors.white.withValues(alpha: 0.6),
+              ),
+            ),
+          ),
+          const SizedBox(height: 10),
+          SizedBox(
+            height: 44,
+            child: OutlinedButton.icon(
+              onPressed:
+                  hasSelection && hasArgument
+                      ? () => _showActionToast(
+                        'Reject Dispute (not wired yet).',
+                      )
+                      : null,
+              icon: const Icon(Icons.close, size: 18),
+              label: const Text('Reject Dispute'),
+              style: OutlinedButton.styleFrom(
+                foregroundColor: AppColors.stopRed,
+                side: BorderSide(
+                  color: AppColors.stopRed.withValues(alpha: 0.7),
+                ),
+                disabledForegroundColor: AppColors.textMuted,
+              ),
+            ),
+          ),
+          const SizedBox(height: 10),
+          SizedBox(
+            height: 44,
+            child: OutlinedButton.icon(
+              onPressed:
+                  hasSelection && hasArgument
+                      ? () => _showActionToast(
+                        'Accept Dispute (not wired yet).',
+                      )
+                      : null,
+              icon: const Icon(Icons.check, size: 18),
+              label: const Text('Accept Dispute'),
+              style: OutlinedButton.styleFrom(
+                foregroundColor: AppColors.activeGreen,
+                side: BorderSide(
+                  color: AppColors.activeGreen.withValues(alpha: 0.7),
+                ),
+                disabledForegroundColor: AppColors.textMuted,
+              ),
+            ),
+          ),
+          const SizedBox(height: 12),
+          if (!hasSelection)
+            const Text(
+              'Select an incident to enable actions.',
+              style: TextStyle(color: AppColors.textMuted, fontSize: 12),
+            )
+          else if (_isLoadingDisputes)
+            const Text(
+              'Loading arguments...',
+              style: TextStyle(color: AppColors.textMuted, fontSize: 12),
+            )
+          else if (!hasArgument)
+            const Text(
+              'No argument found for this incident.',
+              style: TextStyle(color: AppColors.textMuted, fontSize: 12),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildDetailPanel(Incident inc) {
+    final status = _statusOf(inc);
+    final offenderName =
+        inc.offenderId != null
+            ? (_offenderNameCache[inc.offenderId!] ?? 'Loading...')
+            : 'Unknown / Not Detected';
 
     return Container(
       decoration: BoxDecoration(
@@ -354,7 +603,7 @@ class _VideoAnalysisScreenState extends State<VideoAnalysisScreen> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      '${inc.type} — ${inc.id}',
+                      '${inc.incidentType} — ${_incidentIdLabel(inc.id)}',
                       style: const TextStyle(
                         color: AppColors.textPrimary,
                         fontSize: 18,
@@ -363,7 +612,7 @@ class _VideoAnalysisScreenState extends State<VideoAnalysisScreen> {
                     ),
                     const SizedBox(height: 4),
                     Text(
-                      '${inc.date}  ${inc.time}  ·  ${inc.cameraName}',
+                      '${_dateFormat.format(inc.createdAt)}  ${_timeFormat.format(inc.createdAt)}  ·  Camera ${inc.cameraId}',
                       style: const TextStyle(
                         color: AppColors.textMuted,
                         fontSize: 12,
@@ -378,33 +627,33 @@ class _VideoAnalysisScreenState extends State<VideoAnalysisScreen> {
             const SizedBox(height: 20),
 
             // Metadata grid
-            _metadataGrid(inc, status),
+            _metadataGrid(inc, status, offenderName),
             const SizedBox(height: 20),
 
             // Video player
-            _videoPlayer(),
+            IncidentVideoPlayer(videoPath: inc.videoPath, height: 260),
             const SizedBox(height: 20),
 
-            // Action buttons
-            _actionButtons(inc, status, facialDone),
+            // Disputes
+            _disputesPanel(),
           ],
         ),
       ),
     );
   }
 
-  Widget _metadataGrid(IncidentModel inc, String status) {
+  Widget _metadataGrid(Incident inc, String status, String offenderName) {
     final items = [
-      ['Incident ID', inc.id],
-      ['Type', inc.type],
-      ['Date', inc.date],
-      ['Time', inc.time],
-      ['Camera', inc.cameraName],
-      ['Location', inc.location],
-      ['Confidence', '${inc.confidence}%'],
-      ['Duration', inc.duration],
+      ['Incident ID', _incidentIdLabel(inc.id)],
+      ['Type', inc.incidentType.isEmpty ? 'Unknown' : inc.incidentType],
+      ['Date', _dateFormat.format(inc.createdAt)],
+      ['Time', _timeFormat.format(inc.createdAt)],
+      ['Camera', 'Camera ${inc.cameraId}'],
+      ['Location', 'Unknown'],
+      ['Confidence', '${(inc.confidenceScore * 100).round()}%'],
+      ['Duration', '-'],
       ['Status', _statusLabel(status)],
-      ['Alleged Offender', inc.offenderName ?? 'Unknown / Not Detected'],
+      ['Alleged Offender', offenderName],
     ];
 
     return Container(
@@ -463,193 +712,30 @@ class _VideoAnalysisScreenState extends State<VideoAnalysisScreen> {
                   );
                 }).toList(),
           ),
-          if (inc.argumentMessage != null) ...[
-            const SizedBox(height: 16),
-            const Divider(color: AppColors.cardBorder),
-            const SizedBox(height: 8),
-            const Text(
-              'Offender Argument',
-              style: TextStyle(
-                color: AppColors.textSecondary,
-                fontSize: 11,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-            const SizedBox(height: 4),
-            Text(
-              inc.argumentMessage!,
-              style: const TextStyle(
-                color: AppColors.warningOrange,
-                fontSize: 13,
-                fontStyle: FontStyle.italic,
-              ),
-            ),
-          ],
         ],
       ),
     );
   }
 
-  Widget _videoPlayer() {
+  Widget _disputesPanel() {
     return Container(
-      height: 260,
+      padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
-        color: Colors.black,
+        color: AppColors.surface,
         borderRadius: BorderRadius.circular(6),
+        border: Border.all(color: AppColors.cardBorder),
       ),
-      child: Stack(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Container(
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(6),
-              gradient: const LinearGradient(
-                begin: Alignment.topCenter,
-                end: Alignment.bottomCenter,
-                colors: [Color(0xFF1A1A2E), Color(0xFF0D0D1A)],
-              ),
-            ),
-            child: Center(
-              child: Icon(
-                Icons.play_circle_outline,
-                color: AppColors.textMuted.withValues(alpha: 0.5),
-                size: 64,
-              ),
-            ),
-          ),
-          Positioned(
-            left: 0,
-            right: 0,
-            bottom: 0,
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-              decoration: BoxDecoration(
-                gradient: LinearGradient(
-                  begin: Alignment.topCenter,
-                  end: Alignment.bottomCenter,
-                  colors: [
-                    Colors.transparent,
-                    Colors.black.withValues(alpha: 0.85),
-                  ],
-                ),
-              ),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  SliderTheme(
-                    data: SliderThemeData(
-                      thumbShape: const RoundSliderThumbShape(
-                        enabledThumbRadius: 5,
-                      ),
-                      trackHeight: 3,
-                      activeTrackColor: AppColors.brandBlue,
-                      inactiveTrackColor: AppColors.textMuted.withValues(
-                        alpha: 0.3,
-                      ),
-                      thumbColor: AppColors.brandBlue,
-                    ),
-                    child: Slider(value: 0, onChanged: (_) {}),
-                  ),
-                  Row(
-                    children: const [
-                      Icon(
-                        Icons.play_arrow,
-                        color: AppColors.textPrimary,
-                        size: 22,
-                      ),
-                      SizedBox(width: 8),
-                      Text(
-                        '0:00 / 0:12',
-                        style: TextStyle(
-                          color: AppColors.textSecondary,
-                          fontSize: 12,
-                        ),
-                      ),
-                      Spacer(),
-                      Icon(
-                        Icons.volume_up_outlined,
-                        color: AppColors.textSecondary,
-                        size: 18,
-                      ),
-                      SizedBox(width: 12),
-                      Icon(
-                        Icons.crop_free,
-                        color: AppColors.textSecondary,
-                        size: 18,
-                      ),
-                    ],
-                  ),
-                ],
-              ),
-            ),
-          ),
-          Positioned(
-            top: 10,
-            left: 10,
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-              decoration: BoxDecoration(
-                color: Colors.red.withValues(alpha: 0.85),
-                borderRadius: BorderRadius.circular(4),
-              ),
-              child: const Text(
-                '● REC',
-                style: TextStyle(
-                  color: Colors.white,
-                  fontSize: 11,
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _actionButtons(IncidentModel inc, String status, bool facialDone) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        const Text(
-          'Actions',
-          style: TextStyle(
-            color: AppColors.textSecondary,
-            fontSize: 13,
-            fontWeight: FontWeight.w600,
-          ),
-        ),
-        const SizedBox(height: 10),
-        if (status == 'pending') ...[
           Row(
             children: [
-              _actionBtn(
-                label: 'Confirm Littering',
-                icon: Icons.check_circle_outline,
-                color: AppColors.activeGreen,
-                onTap:
-                    () => setState(() => _incidentStatus[inc.id] = 'confirmed'),
-              ),
-              const SizedBox(width: 10),
-              _actionBtn(
-                label: 'Mark as False Positive',
-                icon: Icons.cancel_outlined,
-                color: AppColors.alertHigh,
-                onTap:
-                    () => setState(
-                      () => _incidentStatus[inc.id] = 'false_positive',
-                    ),
-              ),
-            ],
-          ),
-        ] else if (status == 'confirmed') ...[
-          Row(
-            children: [
-              Icon(Icons.check_circle, color: AppColors.activeGreen, size: 16),
-              const SizedBox(width: 6),
+              Icon(Icons.forum_outlined, color: AppColors.statPurple, size: 16),
+              const SizedBox(width: 8),
               const Text(
-                'Littering Confirmed',
+                'Disputes / Arguments',
                 style: TextStyle(
-                  color: AppColors.activeGreen,
+                  color: AppColors.textPrimary,
                   fontSize: 13,
                   fontWeight: FontWeight.w600,
                 ),
@@ -657,112 +743,74 @@ class _VideoAnalysisScreenState extends State<VideoAnalysisScreen> {
             ],
           ),
           const SizedBox(height: 12),
-          Row(
-            children: [
-              _actionBtn(
-                label:
-                    facialDone
-                        ? 'Facial Recognition Re-run'
-                        : 'Rerun Facial Recognition',
-                icon: Icons.face_outlined,
-                color: AppColors.brandBlue,
-                onTap: () => setState(() => _facialRecogDone[inc.id] = true),
-              ),
-            ],
-          ),
-          if (facialDone) ...[
-            const SizedBox(height: 12),
-            Row(
-              children: [
-                _actionBtn(
-                  label: 'Send Email Again',
-                  icon: Icons.email_outlined,
-                  color: AppColors.statPurple,
-                  onTap: () {},
-                ),
-                const SizedBox(width: 10),
-                _actionBtn(
-                  label: 'Ignore & Delete Incident',
-                  icon: Icons.delete_outline,
-                  color: AppColors.alertHigh,
-                  onTap: () {
-                    setState(() {
-                      mockIncidents.removeWhere((item) => item.id == inc.id);
-                      _selectedIncident = null;
-                    });
-                  },
-                ),
-              ],
+          if (_isLoadingDisputes)
+            const Center(child: CircularProgressIndicator(strokeWidth: 2))
+          else if (_disputes.isEmpty)
+            const Text(
+              'No disputes found for this incident.',
+              style: TextStyle(color: AppColors.textMuted, fontSize: 12),
+            )
+          else
+            Column(
+              children:
+                  _disputes.map((d) {
+                    final offenderName =
+                        d.offenderId != null
+                            ? (_offenderNameCache[d.offenderId!] ?? 'Loading...')
+                            : 'Unknown';
+                    return Container(
+                      margin: const EdgeInsets.only(bottom: 10),
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: AppColors.cardBackground,
+                        borderRadius: BorderRadius.circular(6),
+                        border: Border.all(color: AppColors.cardBorder),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            children: [
+                              Text(
+                                'Reason: ${d.reason}',
+                                style: const TextStyle(
+                                  color: AppColors.textPrimary,
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                              const Spacer(),
+                              Text(
+                                d.status,
+                                style: const TextStyle(
+                                  color: AppColors.textMuted,
+                                  fontSize: 11,
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 6),
+                          Text(
+                            d.description,
+                            style: const TextStyle(
+                              color: AppColors.textSecondary,
+                              fontSize: 12,
+                            ),
+                          ),
+                          const SizedBox(height: 6),
+                          Text(
+                            'Submitted by: $offenderName',
+                            style: const TextStyle(
+                              color: AppColors.textMuted,
+                              fontSize: 11,
+                            ),
+                          ),
+                        ],
+                      ),
+                    );
+                  }).toList(),
             ),
-          ],
-        ] else if (status == 'false_positive') ...[
-          Row(
-            children: [
-              Icon(Icons.cancel, color: AppColors.alertHigh, size: 16),
-              const SizedBox(width: 6),
-              const Text(
-                'Marked as False Positive',
-                style: TextStyle(
-                  color: AppColors.alertHigh,
-                  fontSize: 13,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 12),
-          _actionBtn(
-            label: 'Restore and Confirm',
-            icon: Icons.history,
-            color: AppColors.textMuted,
-            onTap: () => setState(() => _incidentStatus[inc.id] = 'confirmed'),
-          ),
         ],
-      ],
-    );
-  }
-
-  Widget _actionBtn({
-    required String label,
-    required IconData icon,
-    required Color color,
-    VoidCallback? onTap,
-  }) {
-    return GestureDetector(
-      onTap: onTap,
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 200),
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-        decoration: BoxDecoration(
-          color:
-              onTap != null ? color.withValues(alpha: 0.12) : AppColors.surface,
-          borderRadius: BorderRadius.circular(6),
-          border: Border.all(
-            color:
-                onTap != null
-                    ? color.withValues(alpha: 0.4)
-                    : AppColors.cardBorder,
-          ),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(
-              icon,
-              color: onTap != null ? color : AppColors.textMuted,
-              size: 16,
-            ),
-            const SizedBox(width: 8),
-            Text(
-              label,
-              style: TextStyle(
-                color: onTap != null ? color : AppColors.textMuted,
-                fontSize: 13,
-                fontWeight: FontWeight.w500,
-              ),
-            ),
-          ],
-        ),
       ),
     );
   }

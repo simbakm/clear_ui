@@ -3,53 +3,214 @@ import 'package:fl_chart/fl_chart.dart';
 import '../theme/app_theme.dart';
 import '../widgets/stat_card.dart';
 import '../widgets/camera_card.dart';
+import '../models/camera.dart';
+import '../config/locations.dart';
+import '../widgets/full_screen_camera_dialog.dart';
+import '../config/api_config.dart';
+import '../services/api_service.dart';
+import '../models/incident.dart';
+import 'package:intl/intl.dart';
 
 class OverviewScreen extends StatefulWidget {
   final bool isMonitoring;
-  const OverviewScreen({super.key, required this.isMonitoring});
+  final bool isDiscovering;
+  final String? discoveryError;
+  final Map<String, List<Camera>> camerasByLocation;
+
+  const OverviewScreen({
+    super.key,
+    required this.isMonitoring,
+    required this.isDiscovering,
+    required this.camerasByLocation,
+    this.discoveryError,
+  });
 
   @override
   State<OverviewScreen> createState() => _OverviewScreenState();
 }
 
 class _OverviewScreenState extends State<OverviewScreen> {
+  final DateFormat _dayFormat = DateFormat('EEE');
+  final DateFormat _monthFormat = DateFormat('MMM');
+  final DateFormat _weekFormat = DateFormat('MMM d');
+
+  bool _isLoadingIncidents = false;
+  String? _incidentError;
+  List<Incident> _incidents = [];
+
   String _incidentPeriod = 'Day';
+  Set<String> selectedBatches = {};
 
-  // Mock data
-  final List<FlSpot> _accuracyData = const [
-    FlSpot(0, 89.5),
-    FlSpot(1, 91.2),
-    FlSpot(2, 90.8),
-    FlSpot(3, 93.1),
-    FlSpot(4, 92.4),
-    FlSpot(5, 94.7),
-    FlSpot(6, 94.2),
-  ];
+  List<String> get _allLocations {
+    final extra =
+        widget.camerasByLocation.keys
+            .where((k) => !kCameraLocations.contains(k))
+            .toList();
+    return [...kCameraLocations, ...extra];
+  }
 
-  final Map<String, List<double>> _incidentData = {
-    'Day': [3, 7, 2, 5, 8, 4, 6],
-    'Week': [18, 24, 15, 31, 22, 28, 19],
-    'Month': [72, 95, 88, 110, 84, 97, 103],
+  Map<String, int> get batches => {
+    for (final loc in _allLocations)
+      loc: widget.camerasByLocation[loc]?.length ?? 0,
   };
 
-  final List<String> _dayLabels = [
-    'Mon',
-    'Tue',
-    'Wed',
-    'Thu',
-    'Fri',
-    'Sat',
-    'Sun',
-  ];
-  Set<String> selectedBatches = {'Maingate'};
-  final Map<String, int> batches = {
-    'N-block pavements': 6,
-    'Maingate': 4,
-    'Admin block': 5,
-    'S-Block Entrance': 2,
-    'Multipurpose-hall': 3,
-    'Small-gate': 2,
-  };
+  int get totalCameras =>
+      widget.camerasByLocation.values.fold(0, (sum, list) => sum + list.length);
+
+  void _syncSelections() {
+    final keys = batches.keys.toList();
+    selectedBatches.removeWhere((k) => !keys.contains(k));
+    if (selectedBatches.isEmpty && keys.isNotEmpty) {
+      selectedBatches.add(keys.first);
+      if (keys.length > 1) {
+        selectedBatches.add(keys[1]);
+      }
+    }
+  }
+
+  void _openFullScreen(Camera cam) {
+    final streamUrl = ApiConfig.getCameraStreamUrl(cam.id);
+    showDialog(
+      context: context,
+      builder:
+          (_) => FullScreenCameraDialog(
+            title: '${cam.cameraName} • ${cam.location}',
+            streamUrl: streamUrl,
+          ),
+    );
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _syncSelections();
+    _loadIncidents();
+  }
+
+  @override
+  void didUpdateWidget(covariant OverviewScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.camerasByLocation != widget.camerasByLocation) {
+      _syncSelections();
+    }
+  }
+
+  Future<void> _loadIncidents() async {
+    setState(() {
+      _isLoadingIncidents = true;
+      _incidentError = null;
+    });
+    try {
+      final incidents = await ApiService.getIncidents();
+      if (!mounted) return;
+      setState(() {
+        _incidents = incidents;
+        _isLoadingIncidents = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _incidentError = 'Failed to load incidents.';
+        _isLoadingIncidents = false;
+      });
+    }
+  }
+
+  List<DateTime> _lastNDays(int count) {
+    final today = DateTime.now();
+    return List.generate(count, (i) {
+      final day = today.subtract(Duration(days: count - 1 - i));
+      return DateTime(day.year, day.month, day.day);
+    });
+  }
+
+  DateTime _startOfWeek(DateTime date) {
+    final normalized = DateTime(date.year, date.month, date.day);
+    return normalized.subtract(Duration(days: normalized.weekday - 1));
+  }
+
+  List<DateTime> _lastNWeeks(int count) {
+    final start = _startOfWeek(DateTime.now());
+    return List.generate(count, (i) {
+      final weekStart = start.subtract(Duration(days: (count - 1 - i) * 7));
+      return DateTime(weekStart.year, weekStart.month, weekStart.day);
+    });
+  }
+
+  List<DateTime> _lastNMonths(int count) {
+    final now = DateTime.now();
+    return List.generate(count, (i) {
+      final month = DateTime(now.year, now.month - (count - 1 - i), 1);
+      return DateTime(month.year, month.month, 1);
+    });
+  }
+
+  List<FlSpot> _buildAccuracyData() {
+    final days = _lastNDays(7);
+    final data = <FlSpot>[];
+    for (var i = 0; i < days.length; i++) {
+      final day = days[i];
+      final matches = _incidents.where((incident) {
+        final created = incident.createdAt;
+        return created.year == day.year &&
+            created.month == day.month &&
+            created.day == day.day &&
+            incident.hasConfidence;
+      }).toList();
+
+      final avg = matches.isEmpty
+          ? 0.0
+          : matches
+                  .map((e) => e.confidenceScore * 100)
+                  .reduce((a, b) => a + b) /
+              matches.length;
+      data.add(FlSpot(i.toDouble(), avg));
+    }
+    return data;
+  }
+
+  List<double> _buildIncidentCounts(String period) {
+    if (period == 'Day') {
+      final days = _lastNDays(7);
+      return days.map((day) {
+        return _incidents.where((incident) {
+          final created = incident.createdAt;
+          return created.year == day.year &&
+              created.month == day.month &&
+              created.day == day.day;
+        }).length.toDouble();
+      }).toList();
+    }
+    if (period == 'Week') {
+      final weeks = _lastNWeeks(7);
+      return weeks.map((weekStart) {
+        final weekEnd = weekStart.add(const Duration(days: 7));
+        return _incidents.where((incident) {
+          final created = incident.createdAt;
+          return !created.isBefore(weekStart) && created.isBefore(weekEnd);
+        }).length.toDouble();
+      }).toList();
+    }
+
+    final months = _lastNMonths(7);
+    return months.map((monthStart) {
+      final monthEnd = DateTime(monthStart.year, monthStart.month + 1, 1);
+      return _incidents.where((incident) {
+        final created = incident.createdAt;
+        return !created.isBefore(monthStart) && created.isBefore(monthEnd);
+      }).length.toDouble();
+    }).toList();
+  }
+
+  List<String> _buildIncidentLabels(String period) {
+    if (period == 'Day') {
+      return _lastNDays(7).map((d) => _dayFormat.format(d)).toList();
+    }
+    if (period == 'Week') {
+      return _lastNWeeks(7).map((w) => _weekFormat.format(w)).toList();
+    }
+    return _lastNMonths(7).map((m) => _monthFormat.format(m)).toList();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -63,7 +224,10 @@ class _OverviewScreenState extends State<OverviewScreen> {
             children: [
               StatCard(
                 label: 'Active Cameras',
-                value: widget.isMonitoring ? '25/25' : '0/25',
+                value:
+                    widget.isMonitoring
+                        ? '$totalCameras/$totalCameras'
+                        : '0/$totalCameras',
                 icon: Icons.videocam,
                 accentColor: AppColors.statBlue,
               ),
@@ -99,19 +263,38 @@ class _OverviewScreenState extends State<OverviewScreen> {
                         Icons.analytics_outlined,
                         'Accuracy Trend',
                         AppColors.brandBlue,
-                        trailing: const Text(
-                          'Last 7 days',
-                          style: TextStyle(
-                            color: AppColors.textMuted,
-                            fontSize: 12,
-                          ),
-                        ),
+                        trailing:
+                            _isLoadingIncidents
+                                ? const Text(
+                                  'Loading...',
+                                  style: TextStyle(
+                                    color: AppColors.textMuted,
+                                    fontSize: 12,
+                                  ),
+                                )
+                                : const Text(
+                                  'Last 7 days',
+                                  style: TextStyle(
+                                    color: AppColors.textMuted,
+                                    fontSize: 12,
+                                  ),
+                                ),
                       ),
                       const SizedBox(height: 20),
                       SizedBox(
                         height: 180,
                         child: LineChart(_buildAccuracyChart()),
                       ),
+                      if (_incidentError != null) ...[
+                        const SizedBox(height: 8),
+                        Text(
+                          _incidentError!,
+                          style: const TextStyle(
+                            color: AppColors.alertHigh,
+                            fontSize: 11,
+                          ),
+                        ),
+                      ],
                     ],
                   ),
                 ),
@@ -227,9 +410,35 @@ class _OverviewScreenState extends State<OverviewScreen> {
                   ],
                 ),
                 const SizedBox(height: 16),
-                // Batch selector
+                if (widget.isDiscovering) ...[
+                  Row(
+                    children: const [
+                      SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      ),
+                      SizedBox(width: 10),
+                      Text(
+                        'Discovering cameras...',
+                        style: TextStyle(
+                          color: AppColors.textMuted,
+                          fontSize: 13,
+                        ),
+                      ),
+                    ],
+                  ),
+                ] else if (widget.discoveryError != null) ...[
+                  Text(
+                    widget.discoveryError!,
+                    style: const TextStyle(
+                      color: AppColors.alertHigh,
+                      fontSize: 13,
+                    ),
+                  ),
+                ],
                 const Text(
-                  'Select Camera Batches to Display',
+                  'Select Camera Locations to Display',
                   style: TextStyle(
                     color: AppColors.textSecondary,
                     fontSize: 13,
@@ -302,10 +511,10 @@ class _OverviewScreenState extends State<OverviewScreen> {
                       }).toList(),
                 ),
                 const SizedBox(height: 20),
-                // Camera grids
                 ...selectedBatches.map((batchName) {
-                  final cameraCount = batches[batchName] ?? 0;
-                  final displayCount = cameraCount > 4 ? 4 : cameraCount;
+                  final cameras = widget.camerasByLocation[batchName] ?? [];
+                  final showPlaceholders =
+                      !widget.isMonitoring || cameras.isEmpty;
                   return Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
@@ -328,12 +537,26 @@ class _OverviewScreenState extends State<OverviewScreen> {
                               mainAxisSpacing: 10,
                               childAspectRatio: 1.6,
                             ),
-                        itemCount: displayCount,
-                        itemBuilder:
-                            (context, index) => CameraCard(
-                              name: '$batchName Cam ${index + 1}',
-                              isMonitoring: widget.isMonitoring,
-                            ),
+                        itemCount: showPlaceholders ? 4 : cameras.length,
+                        itemBuilder: (context, index) {
+                          if (showPlaceholders) {
+                            return CameraCard(
+                              name: 'Unavailable',
+                              isMonitoring: false,
+                              statusLabel: 'UNAVAILABLE',
+                            );
+                          }
+                          final cam = cameras[index];
+                          final streamUrl = ApiConfig.getCameraStreamUrl(
+                            cam.id,
+                          );
+                          return CameraCard(
+                            name: cam.cameraName,
+                            isMonitoring: widget.isMonitoring,
+                            streamUrl: streamUrl,
+                            onOpenFullScreen: () => _openFullScreen(cam),
+                          );
+                        },
                       ),
                       const SizedBox(height: 16),
                     ],
@@ -384,6 +607,8 @@ class _OverviewScreenState extends State<OverviewScreen> {
   }
 
   LineChartData _buildAccuracyChart() {
+    final accuracyData = _buildAccuracyData();
+    final dayLabels = _buildIncidentLabels('Day');
     return LineChartData(
       gridData: FlGridData(
         show: true,
@@ -393,19 +618,19 @@ class _OverviewScreenState extends State<OverviewScreen> {
       ),
       titlesData: FlTitlesData(
         bottomTitles: AxisTitles(
-          sideTitles: SideTitles(
-            showTitles: true,
-            getTitlesWidget: (value, _) {
-              final i = value.toInt();
-              if (i < 0 || i >= _dayLabels.length) return const SizedBox();
-              return Padding(
-                padding: const EdgeInsets.only(top: 6),
-                child: Text(
-                  _dayLabels[i],
-                  style: const TextStyle(
-                    color: AppColors.textMuted,
-                    fontSize: 10,
-                  ),
+            sideTitles: SideTitles(
+              showTitles: true,
+              getTitlesWidget: (value, _) {
+                final i = value.toInt();
+                if (i < 0 || i >= dayLabels.length) return const SizedBox();
+                return Padding(
+                  padding: const EdgeInsets.only(top: 6),
+                  child: Text(
+                    dayLabels[i],
+                    style: const TextStyle(
+                      color: AppColors.textMuted,
+                      fontSize: 10,
+                    ),
                 ),
               );
             },
@@ -431,11 +656,11 @@ class _OverviewScreenState extends State<OverviewScreen> {
         topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
       ),
       borderData: FlBorderData(show: false),
-      minY: 80,
+      minY: 0,
       maxY: 100,
       lineBarsData: [
         LineChartBarData(
-          spots: _accuracyData,
+          spots: accuracyData,
           isCurved: true,
           color: AppColors.brandBlue,
           barWidth: 2.5,
@@ -458,7 +683,8 @@ class _OverviewScreenState extends State<OverviewScreen> {
   }
 
   BarChartData _buildIncidentChart() {
-    final data = _incidentData[_incidentPeriod]!;
+    final data = _buildIncidentCounts(_incidentPeriod);
+    final labels = _buildIncidentLabels(_incidentPeriod);
     return BarChartData(
       gridData: FlGridData(
         show: true,
@@ -468,19 +694,19 @@ class _OverviewScreenState extends State<OverviewScreen> {
       ),
       titlesData: FlTitlesData(
         bottomTitles: AxisTitles(
-          sideTitles: SideTitles(
-            showTitles: true,
-            getTitlesWidget: (value, _) {
-              final i = value.toInt();
-              if (i < 0 || i >= _dayLabels.length) return const SizedBox();
-              return Padding(
-                padding: const EdgeInsets.only(top: 6),
-                child: Text(
-                  _dayLabels[i],
-                  style: const TextStyle(
-                    color: AppColors.textMuted,
-                    fontSize: 10,
-                  ),
+            sideTitles: SideTitles(
+              showTitles: true,
+              getTitlesWidget: (value, _) {
+                final i = value.toInt();
+                if (i < 0 || i >= labels.length) return const SizedBox();
+                return Padding(
+                  padding: const EdgeInsets.only(top: 6),
+                  child: Text(
+                    labels[i],
+                    style: const TextStyle(
+                      color: AppColors.textMuted,
+                      fontSize: 10,
+                    ),
                 ),
               );
             },
@@ -520,7 +746,7 @@ class _OverviewScreenState extends State<OverviewScreen> {
                   ),
                   backDrawRodData: BackgroundBarChartRodData(
                     show: true,
-                    toY: (data.reduce((a, b) => a > b ? a : b) * 1.2),
+                    toY: (data.isEmpty ? 1 : data.reduce((a, b) => a > b ? a : b) * 1.2),
                     color: AppColors.surface,
                   ),
                 ),
@@ -530,3 +756,5 @@ class _OverviewScreenState extends State<OverviewScreen> {
     );
   }
 }
+
+

@@ -24,22 +24,33 @@ class Incident {
   });
 
   factory Incident.fromJson(Map<String, dynamic> json) {
+    final createdAtRaw = json['createdAt'];
+    final updatedAtRaw = json['updatedAt'];
+    final createdAt =
+        createdAtRaw != null ? DateTime.parse(createdAtRaw) : DateTime.now();
+    final updatedAt =
+        updatedAtRaw != null ? DateTime.parse(updatedAtRaw) : createdAt;
+
     return Incident(
-      id: json['id'],
-      cameraId: json['cameraId'],
+      id: json['id'] ?? 0,
+      cameraId: json['cameraId'] ?? 0,
       offenderId: json['offenderId'],
       detectedAt:
           json['detectedAt'] != null
               ? DateTime.parse(json['detectedAt'])
               : null,
-      confidenceScore: (json['confidenceScore'] as num).toDouble(),
-      videoPath: json['videoPath'],
-      incidentType: json['incidentType'],
-      status: json['status'],
-      createdAt: DateTime.parse(json['createdAt']),
-      updatedAt: DateTime.parse(json['updatedAt']),
+      confidenceScore:
+          json['confidenceScore'] != null
+              ? (json['confidenceScore'] as num).toDouble()
+              : 0.0,
+      videoPath: json['videoPath'] ?? '',
+      incidentType: json['incidentType'] ?? 'UNKNOWN',
+      status: json['status'] ?? 'UNKNOWN',
+      createdAt: createdAt,
+      updatedAt: updatedAt,
     );
   }
 
   DateTime get effectiveDate => detectedAt ?? createdAt;
+  bool get hasConfidence => confidenceScore > 0;
 }
